@@ -1,35 +1,21 @@
 import json,re,subprocess,os
 from pathlib import Path
-from urllib.request import urlopen,Request
-from xml.etree import ElementTree
 from datetime import datetime
 
-def get_videos():
-    url="https://www.youtube.com/feeds/videos.xml?channel_id=UCRzbOEy7m44akpTBhHuClgA"
-    r=Request(url,headers={"User-Agent":"Mozilla/5.0"})
-    with urlopen(r,timeout=30) as f:x=f.read()
-    ns={"a":"http://www.w3.org/2005/Atom","y":"http://www.youtube.com/xml/schemas/2015"}
-    root=ElementTree.fromstring(x)
+def get_latest():
+    r=subprocess.run(["yt-dlp","--flat-playlist","--print","%(id)s %(title)s",
+        "--playlist-items","1:5","--no-warnings",
+        "https://www.youtube.com/@BloombergTelevision/videos"],
+        capture_output=True,text=True,timeout=60)
     vids=[]
-    for e in root.findall("a:entry",ns):
-        t=e.find("a:title",ns).text or""
-        if any(k in t.lower() for k in["daybreak","surveillance","brief","open interest","the close","balance of power"]):
-            vids.append({"id":e.find("y:videoId",ns).text,"title":t,"url":"https://www.youtube.com/watch?v="+e.find("y:videoId",ns).text})
+    for line in r.stdout.strip().split("\n"):
+        if not line.strip():continue
+        parts=line.split(" ",1)
+        if len(parts)==2:
+            vid,title=parts
+            if any(k in title.lower() for k in["daybreak","surveillance","brief","open interest","the close","balance of power"]):
+                vids.append({"id":vid,"title":title,"url":"https://www.youtube.com/watch?v="+vid})
     return vids
-
-def get_subs(url):
-    subprocess.run(["yt-dlp","--write-auto-sub","--sub-lang","en","--skip-download","--sub-format","vtt","-o","/tmp/s.%(ext)s","--no-playlist",url],capture_output=True)
-    for f in Path("/tmp").glob("*.vtt"):
-        prev=""
-        lines=[]
-        for l in f.read_text(errors="ignore").split("\n"):
-            l=l.strip()
-            if not l or l.startswith("WEBVTT") or l.startswith("Kind") or l.startswith("Lang") or"-->"in l or re.match(r"^\d+$",l):continue
-            c=re.sub(r"<[^>]+>","",l).strip()
-            if c and c!=prev:lines.append(c);prev=c
-        f.unlink()
-        return" ".join(lines)
-    return""
 
 def whisper_transcribe(url):
     subprocess.run(["yt-dlp","-x","--audio-format","wav","--postprocessor-args","-ar 16000 -ac 1","-o","/tmp/a.%(ext)s","--no-playlist",url],capture_output=True)
@@ -45,7 +31,7 @@ def whisper_transcribe(url):
 def analyze(client,text,title):
     sp="JSONだけ返せ。説明不要。"
     r1=client.messages.create(model="claude-sonnet-4-20250514",max_tokens=3000,system=sp,
-        messages=[{"role":"user","content":"Bloomberg Briefトランスクリプトをテーマ3-5個に分割。transcriptは誤字修正済み英語、translationは自然な日本語、market_impactは投資への影響。\nJSON:{\"segments\":[{\"theme\":\"英語\",\"theme_ja\":\"日本語\",\"transcript\":\"英語\",\"translation\":\"日本語\",\"market_impact\":\"日本語\"}],\"macro_summary\":{\"key_takeaways\":[\"日本語\"],\"market_sentiment\":\"日本語\",\"sectors_to_watch\":[\"セクター\"]}}\n\nテキスト:\n"+text[:6000]}])
+        messages=[{"role":"user","content":"Bloomberg Briefトランスクリプトをテーマ3-5個に分割。transcriptは正確な英語、translationは自然な日本語、market_impactは投資への影響。\nJSON:{\"segments\":[{\"theme\":\"英語\",\"theme_ja\":\"日本語\",\"transcript\":\"英語\",\"translation\":\"日本語\",\"market_impact\":\"日本語\"}],\"macro_summary\":{\"key_takeaways\":[\"日本語\"],\"market_sentiment\":\"日本語\",\"sectors_to_watch\":[\"セクター\"]}}\n\nテキスト:\n"+text[:6000]}])
     raw1="".join(b.text for b in r1.content if b.type=="text")
     s1=raw1.find("{");e1=raw1.rfind("}")
     d1=json.loads(raw1[s1:e1+1])
@@ -91,18 +77,16 @@ def main():
     done=[]
     dp=Path("done.json")
     if dp.exists():done=json.loads(dp.read_text())
-    vids=get_videos()
-    if not vids:print("No videos");return
+    vids=get_latest()
+    if not vids:print("No new videos found");return
     import anthropic
     client=anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     for v in vids[:1]:
         if v["id"]in done:print("Skip "+v["id"]);continue
         print("Processing: "+v["title"])
         text=whisper_transcribe(v["url"])
-        if not text:
-            print("Whisper failed, trying subs...")
-            text=get_subs(v["url"])
-        if not text:print("No transcript");continue
+        if not text:print("Transcription failed");continue
+        print("Transcribed: "+str(len(text))+" chars")
         a=analyze(client,text,v["title"])
         Path("reports").mkdir(exist_ok=True)
         d=a.get("date",datetime.now().strftime("%Y-%m-%d"))
