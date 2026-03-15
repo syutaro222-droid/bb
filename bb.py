@@ -7,9 +7,23 @@ def clean_url(url):
         vid=url.split("youtu.be/")[1].split("?")[0].split("&")[0]
         return "https://www.youtube.com/watch?v="+vid
     if "watch?v=" in url:
-        vid=url.split("watch?v=")[1].split("&")[0].split("?")[0]
+        vid=url.split("watch?v=")[1].split("&")[0]
         return "https://www.youtube.com/watch?v="+vid
     return url
+
+def dl(url):
+    cmds=[
+        ["yt-dlp","-x","--audio-format","wav","-o","/tmp/bb/a.%(ext)s","--no-playlist","--extractor-args","youtube:player_client=web,default","--no-check-certificates",url],
+        ["yt-dlp","-x","--audio-format","wav","-o","/tmp/bb/a.%(ext)s","--no-playlist","--extractor-args","youtube:player_client=mweb","--no-check-certificates",url],
+        ["yt-dlp","-x","-o","/tmp/bb/a.%(ext)s","--no-playlist","--no-check-certificates",url],
+    ]
+    for i,cmd in enumerate(cmds):
+        print(f"  試行{i+1}...")
+        for f in Path("/tmp/bb").glob("a.*"):f.unlink()
+        r=subprocess.run(cmd,capture_output=True,text=True,timeout=120)
+        for f in Path("/tmp/bb").glob("a.*"):return f
+        print("  stderr: "+r.stderr[:200])
+    return None
 
 def main():
     url=clean_url(sys.argv[1])
@@ -26,31 +40,28 @@ def main():
     print("2/4 音声ダウンロード...")
     Path("/tmp/bb").mkdir(exist_ok=True)
     for f in Path("/tmp/bb").glob("*"):f.unlink()
-    r=subprocess.run(["yt-dlp","-x","--audio-format","wav","--postprocessor-args","-ar 16000 -ac 1","-o","/tmp/bb/a.%(ext)s","--no-playlist",url],capture_output=True,text=True)
-    ap=None
-    for f in Path("/tmp/bb").glob("a.*"):ap=f;break
-    if not ap:
-        print("  yt-dlp stdout: "+r.stdout[:300])
-        print("  yt-dlp stderr: "+r.stderr[:300])
-        print("  再試行中...")
-        r2=subprocess.run(["yt-dlp","-x","-o","/tmp/bb/a.%(ext)s","--no-playlist",url],capture_output=True,text=True)
-        for f in Path("/tmp/bb").glob("a.*"):ap=f;break
+    ap=dl(url)
     if not ap:
         print("音声DL失敗")
         return
-    print("  "+str(round(ap.stat().st_size/1024/1024,1))+"MB")
+    mb=ap.stat().st_size/1024/1024
+    print(f"  完了: {mb:.1f}MB")
+
+    if not str(ap).endswith(".wav"):
+        print("  WAV変換中...")
+        subprocess.run(["ffmpeg","-i",str(ap),"-ar","16000","-ac","1","-y","/tmp/bb/out.wav"],capture_output=True)
+        ap=Path("/tmp/bb/out.wav")
 
     print("3/4 Whisper文字起こし...")
     import whisper
     m=whisper.load_model("base")
     r=m.transcribe(str(ap),language="en")
     text=r["text"]
-    print("  "+str(len(text))+"文字")
+    print(f"  {len(text)}文字")
 
     print("4/4 Claude分析...")
     import anthropic
     client=anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
     sp="JSONだけ返せ。説明不要。"
 
     r1=client.messages.create(model="claude-sonnet-4-20250514",max_tokens=3000,system=sp,
@@ -65,19 +76,17 @@ def main():
 
     a={**d1,**d2,"title":title,"date":datetime.now().strftime("%Y-%m-%d")}
     transcript="\n\n".join(s.get("transcript","") for s in a.get("segments",[]))
-    m=a.get("macro_summary",{})
+    mc=a.get("macro_summary",{})
 
     segs=""
     for i,s in enumerate(a.get("segments",[])):
         segs+=f"<div class=card><h3>{i+1}. {s.get('theme','')} / {s.get('theme_ja','')}</h3><p><b>English:</b> {s.get('transcript','')}</p><p><b>日本語:</b> {s.get('translation','')}</p><p><b>Impact:</b> {s.get('market_impact','')}</p></div>"
-
     vocs=""
     for v in a.get("vocabulary",[]):
         exs="".join(f"<div class=ex><b>{e.get('type','')}:</b> {e.get('en','')}<br><i>{e.get('ja','')}</i></div>" for e in v.get("examples",[]))
         vocs+=f"<div class=vcard><h3>{v.get('expression','')} ({v.get('reading','')})</h3><p><b>意味:</b> {v.get('meaning','')}</p><p><b>語源:</b> {v.get('etymology','')}</p><p><b>使われ方:</b> {v.get('context','')}</p><p><b>Collocations:</b> {', '.join(v.get('collocations',[]))}</p>{exs}</div>"
-
-    tk="".join(f"<li>{t}</li>" for t in m.get("key_takeaways",[]))
-    sc=", ".join(m.get("sectors_to_watch",[]))
+    tk="".join(f"<li>{t}</li>" for t in mc.get("key_takeaways",[]))
+    sc=", ".join(mc.get("sectors_to_watch",[]))
 
     html=f"""<!DOCTYPE html><html><head><meta charset=UTF-8><meta name=viewport content="width=device-width,initial-scale=1">
 <style>body{{font-family:sans-serif;background:#0a1628;color:#d4dce6;padding:16px;max-width:800px;margin:0 auto}}
@@ -86,7 +95,7 @@ a{{color:#00a0ff}}.card,.vcard{{background:rgba(255,255,255,.04);border-left:3px
 .vcard{{border-left-color:#ffaa32}}.ex{{background:rgba(0,0,0,.2);padding:8px;margin:4px 0;border-radius:4px;font-size:14px}}
 li{{line-height:2}}b{{color:#fff}}i{{color:rgba(200,215,230,.6)}}</style></head>
 <body><h1>{title}</h1><p>{a['date']}</p><a href="{url}">YouTube</a>
-<h2>Key Takeaways</h2><ul>{tk}</ul><p><b>Sentiment:</b> {m.get('market_sentiment','')}</p><p><b>注目:</b> {sc}</p>
+<h2>Key Takeaways</h2><ul>{tk}</ul><p><b>Sentiment:</b> {mc.get('market_sentiment','')}</p><p><b>注目:</b> {sc}</p>
 <h2>テーマ別</h2>{segs}<h2>重要表現</h2>{vocs}
 <h2>Full Transcript</h2><div style="background:rgba(0,0,0,.2);padding:16px;border-radius:6px;line-height:2">{transcript}</div></body></html>"""
 
