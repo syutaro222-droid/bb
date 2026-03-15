@@ -2,8 +2,17 @@ import json,re,subprocess,os,sys
 from pathlib import Path
 from datetime import datetime
 
+def clean_url(url):
+    if "youtu.be/" in url:
+        vid=url.split("youtu.be/")[1].split("?")[0].split("&")[0]
+        return "https://www.youtube.com/watch?v="+vid
+    if "watch?v=" in url:
+        vid=url.split("watch?v=")[1].split("&")[0].split("?")[0]
+        return "https://www.youtube.com/watch?v="+vid
+    return url
+
 def main():
-    url=sys.argv[1]
+    url=clean_url(sys.argv[1])
     print("URL: "+url)
 
     print("1/4 タイトル取得...")
@@ -17,9 +26,15 @@ def main():
     print("2/4 音声ダウンロード...")
     Path("/tmp/bb").mkdir(exist_ok=True)
     for f in Path("/tmp/bb").glob("*"):f.unlink()
-    subprocess.run(["yt-dlp","-x","--audio-format","wav","--postprocessor-args","-ar 16000 -ac 1","-o","/tmp/bb/a.%(ext)s","--no-playlist",url],capture_output=True)
+    r=subprocess.run(["yt-dlp","-x","--audio-format","wav","--postprocessor-args","-ar 16000 -ac 1","-o","/tmp/bb/a.%(ext)s","--no-playlist",url],capture_output=True,text=True)
     ap=None
     for f in Path("/tmp/bb").glob("a.*"):ap=f;break
+    if not ap:
+        print("  yt-dlp stdout: "+r.stdout[:300])
+        print("  yt-dlp stderr: "+r.stderr[:300])
+        print("  再試行中...")
+        r2=subprocess.run(["yt-dlp","-x","-o","/tmp/bb/a.%(ext)s","--no-playlist",url],capture_output=True,text=True)
+        for f in Path("/tmp/bb").glob("a.*"):ap=f;break
     if not ap:
         print("音声DL失敗")
         return
