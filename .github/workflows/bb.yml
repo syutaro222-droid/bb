@@ -1,8 +1,10 @@
 name: bb
 on:
-  schedule:
-    - cron: '0 22 * * 0-4'
   workflow_dispatch:
+    inputs:
+      url:
+        description: 'YouTube URL'
+        required: true
 permissions:
   contents: write
 jobs:
@@ -13,8 +15,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - run: sudo apt-get install -y ffmpeg
       - run: pip install yt-dlp openai-whisper anthropic
-      - run: python bb.py
+      - run: python bb.py "${{ github.event.inputs.url }}"
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       - run: |
